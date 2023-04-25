@@ -74,6 +74,7 @@ postprocess:
   apply_nms: true
   apply_sigmoid: false
   discard_background: false
+  mask_rare: true
   max_total_size: 300
   nms_iou_threshold: 0.5
   nms_version: v1

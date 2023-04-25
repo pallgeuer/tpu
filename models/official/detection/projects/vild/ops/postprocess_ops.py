@@ -447,7 +447,8 @@ class GenericDetectionGenerator(object):
                visual_feature_distill=None):
     self._apply_nms = params.apply_nms
     self._feat_distill = visual_feature_distill
-    if self._feat_distill == 'double_branch':
+    self._mask_rare = params.mask_rare
+    if self._feat_distill == 'double_branch' and self._mask_rare:
       with tf.gfile.GFile(params.rare_mask_path, 'rb') as f:
         self._rare_mask = np.array(np.load(f), dtype=np.float32)[None, None, 1:]
     self._generate_detections = generate_detections_factory(params)
@@ -511,7 +512,7 @@ class GenericDetectionGenerator(object):
           distill_class_outputs, axis=-1)  # [B, num_rois, num_classes]
       third_component = (
           1.0 - self._rare_mask
-      ) * distill_class_outputs + self._rare_mask * class_outputs
+      ) * distill_class_outputs + self._rare_mask * class_outputs if self._mask_rare else class_outputs
       weighted_product = distill_class_outputs * class_outputs * third_component
       class_outputs = tf.pow(weighted_product, 1.0/3.0)
 

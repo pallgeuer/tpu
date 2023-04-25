@@ -143,6 +143,7 @@ VILD_CFG.override({
         'max_total_size': 300,
         'score_threshold': 0.0,
         'pre_nms_num_boxes': 1000,
+        'mask_rare': True,
         'rare_mask_path': '',
         'apply_sigmoid': False,  # Not used, but misleading.
         # whether to remove background before softmax
