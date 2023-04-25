@@ -149,7 +149,6 @@ train:
   train_dataset_type: tfrecord
   transpose_input: true
 type: vild
-use_tpu: false
 vild_parser:
   aug_rand_hflip: true
   aug_scale_max: 2.0
