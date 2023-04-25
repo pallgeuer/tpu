@@ -161,9 +161,9 @@ def resize_and_crop_image(image,
     image_info: a 2D `Tensor` that encodes the information of the image and the
       applied preprocessing. It is in the format of
       [[original_height, original_width], [desired_height, desired_width],
-       [y_scale, x_scale], [y_offset, x_offset]], where [desired_height,
-      desired_width] is the actual scaled image size, and [y_scale, x_scale] is
-      the scaling factor, which is the ratio of
+       [y_scale, x_scale], [y_offset, x_offset], [padded_height, padded_width]],
+      where [desired_height, desired_width] is the actual scaled image size, and
+      [y_scale, x_scale] is the scaling factor, which is the ratio of
       scaled dimension / original dimension.
   """
   with tf.name_scope('resize_and_crop_image'):
@@ -212,7 +212,9 @@ def resize_and_crop_image(image,
         image_size,
         tf.constant(desired_size, dtype=tf.float32),
         image_scale,
-        tf.cast(offset, tf.float32)])
+        tf.cast(offset, dtype=tf.float32),
+        tf.constant(padded_size, dtype=tf.float32),
+    ])
     return output_image, image_info
 
 
@@ -258,9 +260,9 @@ def resize_and_crop_image_v2(image,
     image_info: a 2D `Tensor` that encodes the information of the image and the
       applied preprocessing. It is in the format of
       [[original_height, original_width], [desired_height, desired_width],
-       [y_scale, x_scale], [y_offset, x_offset]], where [desired_height,
-      desired_width] is the actual scaled image size, and [y_scale, x_scale] is
-      the scaling factor, which is the ratio of
+       [y_scale, x_scale], [y_offset, x_offset], [padded_height, padded_width]],
+      where [desired_height, desired_width] is the actual scaled image size, and
+      [y_scale, x_scale] is the scaling factor, which is the ratio of
       scaled dimension / original dimension.
   """
   with tf.name_scope('resize_and_crop_image_v2'):
@@ -315,7 +317,9 @@ def resize_and_crop_image_v2(image,
         image_size,
         tf.cast(desired_size, dtype=tf.float32),
         image_scale,
-        tf.cast(offset, tf.float32)])
+        tf.cast(offset, dtype=tf.float32),
+        tf.constant(padded_size, dtype=tf.float32),
+    ])
     return output_image, image_info
 
 
