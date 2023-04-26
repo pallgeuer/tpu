@@ -150,6 +150,14 @@ def export(config_file, params_override, resnet_depth, checkpoint_path, classifi
 	print("Done")
 	print()
 
+	print("Creating variables.txt with list of saved model variables...")
+	reader = tf.train.NewCheckpointReader(os.path.join(export_dir, 'variables', 'variables'))
+	variable_shape_map = reader.get_variable_to_shape_map()
+	pprint.pprint(variable_shape_map, width=120)
+	with open(os.path.join(export_dir, 'variables.txt'), 'w') as file:
+		pprint.pprint(variable_shape_map, width=120, stream=file)
+	print()
+
 	print("Creating info.txt with saved model information...")
 	with contextlib.redirect_stdout(io.StringIO()) as string_buffer:
 		parser = saved_model_cli.create_parser()
@@ -159,14 +167,6 @@ def export(config_file, params_override, resnet_depth, checkpoint_path, classifi
 	print(info)
 	with open(os.path.join(export_dir, 'info.txt'), 'w') as file:
 		print(info, file=file)
-	print()
-
-	print("Creating variables.txt with list of saved model variables...")
-	reader = tf.train.NewCheckpointReader(os.path.join(export_dir, 'variables', 'variables'))
-	variable_shape_map = reader.get_variable_to_shape_map()
-	pprint.pprint(variable_shape_map, width=120)
-	with open(os.path.join(export_dir, 'variables.txt'), 'w') as file:
-		pprint.pprint(variable_shape_map, width=120, stream=file)
 	print()
 
 # Serving input function
