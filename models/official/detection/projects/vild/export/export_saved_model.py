@@ -18,6 +18,7 @@ from tensorflow.python.ops import control_flow_util as tensorflow_control_flow_u
 import tensorflow.python.tools.saved_model_cli as saved_model_cli
 import hyperparameters.params_dict
 import serving.detection
+import serving.inputs
 import projects.vild.configs.vild_config as vild_config
 
 # Command line flags
@@ -26,10 +27,11 @@ flags.DEFINE_string('config_file', '', "JSON/YAML configuration file to use")
 flags.DEFINE_string('params_override', '', "String or JSON/YAML specifying configuration parameters to overlay on top of the loaded configuration file")
 flags.DEFINE_integer('resnet_depth', 50, "ResNet backbone depth")
 flags.DEFINE_string('checkpoint_path', None, "Input checkpoint specification (appending .index or .meta to this path should yield existing file paths)")
-flags.DEFINE_string('classifier_weights', None, "Weights to use in the classification head to classify the base classes")
+flags.DEFINE_string('classifier_weights', None, "Weights to initialise the CLIP classification dense layer with")
 flags.DEFINE_string('export_dir', None, "Export directory to write saved model files into (created if doesn't exist)")
 flags.DEFINE_boolean('overwrite_export_dir', False, "Delete and recreate the export directory if it exists")
 flags.DEFINE_string('image_size', '640x640', "Expected input image width and height separated by 'x'")
+flags.DEFINE_boolean('include_mask', False, "Include prediction of segmentation masks as one of the model outputs")
 flags.mark_flag_as_required('checkpoint_path')
 flags.mark_flag_as_required('classifier_weights')
 flags.mark_flag_as_required('export_dir')
@@ -47,10 +49,11 @@ def main(argv):
 		export_dir=FLAGS.export_dir,
 		overwrite_export_dir=FLAGS.overwrite_export_dir,
 		image_size=(int(image_height_str), int(image_width_str)),
+		include_mask=FLAGS.include_mask,
 	)
 
-# Export saved model function
-def export(config_file, params_override, resnet_depth, checkpoint_path, classifier_weights, export_dir, overwrite_export_dir, image_size):
+# Export checkpoint as saved model
+def export(config_file, params_override, resnet_depth, checkpoint_path, classifier_weights, export_dir, overwrite_export_dir, image_size, include_mask):
 
 	export_dir_exists = os.path.exists(export_dir)
 	print("Exporting ViLD checkpoint as saved model:")
@@ -61,6 +64,7 @@ def export(config_file, params_override, resnet_depth, checkpoint_path, classifi
 	print(f"  Classifier weights: {classifier_weights}")
 	print(f"  Export dir: {export_dir}{' [OVERWRITE]' if overwrite_export_dir and export_dir_exists else ''}")
 	print(f"  Image size: {image_size[1]}x{image_size[0]}")
+	print(f"  Include mask: {include_mask}")
 	print()
 
 	tensorflow_control_flow_util.enable_control_flow_v2()
@@ -79,7 +83,7 @@ def export(config_file, params_override, resnet_depth, checkpoint_path, classifi
 		params = hyperparameters.params_dict.override_params_dict(params, params_override, is_strict=False)
 
 	params.override({
-		'architecture': {'use_bfloat16': False},
+		'architecture': {'use_bfloat16': False, 'include_mask': include_mask},
 		'eval': {'eval_batch_size': 1},
 		'frcnn_class_loss': {'mask_rare': False},
 		'frcnn_head': {'classifier_weight_path': classifier_weights},
@@ -96,6 +100,8 @@ def export(config_file, params_override, resnet_depth, checkpoint_path, classifi
 	pprint.pprint(model_params, width=120)
 	print()
 
+	print("Creating serving input receiver function...")
+	serving_input_receiver_fn = functools.partial(serving_input_fn, image_size=image_size, max_level=params.architecture.max_level)
 	print("Creating serving model function...")
 	serving_model_fn = serving.detection.serving_model_fn_builder(  # TODO: Need to change something here to customise which outputs are served
 		export_tpu_model=False,
@@ -103,15 +109,6 @@ def export(config_file, params_override, resnet_depth, checkpoint_path, classifi
 		output_normalized_coordinates=False,
 		cast_num_detections_to_float=False,
 		cast_detection_classes_to_float=False,
-	)
-	print("Creating serving input receiver function...")
-	serving_input_receiver_fn = functools.partial(
-		serving.detection.serving_input_fn,
-		batch_size=1,
-		desired_image_size=image_size,
-		stride=2 ** params.architecture.max_level,
-		input_type='image_tensor',
-		input_name='image_tensor'
 	)
 	print("Done")
 	print()
@@ -171,6 +168,18 @@ def export(config_file, params_override, resnet_depth, checkpoint_path, classifi
 	with open(os.path.join(export_dir, 'variables.txt'), 'w') as file:
 		pprint.pprint(variable_shape_map, width=120, stream=file)
 	print()
+
+# Serving input function
+def serving_input_fn(image_size, max_level):
+	image_placeholder = tf.placeholder(dtype=tf.uint8, shape=(1, None, None, 3), name='ImageTensor')
+	image = tf.squeeze(image_placeholder, axis=0)
+	image, image_info = serving.inputs.preprocess_image(image=image, desired_size=image_size, stride=2 ** max_level)
+	images = tf.expand_dims(image, axis=0)
+	images_info = tf.expand_dims(image_info, axis=0)
+	return tf.estimator.export.ServingInputReceiver(
+		features={'images': images, 'image_info': images_info},
+		receiver_tensors={'image_tensor': image_placeholder},
+	)
 
 # Run main function
 if __name__ == '__main__':
