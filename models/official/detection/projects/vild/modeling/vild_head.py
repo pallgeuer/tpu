@@ -258,6 +258,8 @@ class ViLDFastrcnnHead(object):
         tf.logging.info(f'visual_norm: {visual_norm}')  # (B, num_rois, 1)
         projected_net = _divide_no_nan(projected_net, visual_norm)
 
+      feat_outputs = projected_net
+
       if self._feat_distill == 'double_branch':
         tf.logging.info(f'distill_net before projection: {distill_net}')
         projected_distill_net = tf.layers.dense(
@@ -379,4 +381,4 @@ class ViLDFastrcnnHead(object):
           bias_initializer=tf.zeros_initializer(),
           name='box-predict')
 
-      return class_outputs, box_outputs, distill_feat_outputs, distill_class_outputs
+      return box_outputs, feat_outputs, class_outputs, distill_feat_outputs, distill_class_outputs

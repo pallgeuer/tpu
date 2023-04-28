@@ -19,19 +19,30 @@ import tensorflow.python.tools.saved_model_cli as saved_model_cli
 import hyperparameters.params_dict
 import serving.detection
 import serving.inputs
+import dataloader.mode_keys
 import projects.vild.configs.vild_config as vild_config
+import projects.vild.modeling.vild_model as vild_model
 
 # Command line flags
 FLAGS = flags.FLAGS
 flags.DEFINE_string('config_file', '', "JSON/YAML configuration file to use")
 flags.DEFINE_string('params_override', '', "String or JSON/YAML specifying configuration parameters to overlay on top of the loaded configuration file")
 flags.DEFINE_integer('resnet_depth', 50, "ResNet backbone depth")
+flags.DEFINE_boolean('fast_version', True, "Use custom fast version of postprocessing step in order to avoid large inference time bug")
 flags.DEFINE_string('checkpoint_path', None, "Input checkpoint specification (appending .index or .meta to this path should yield existing file paths)")
 flags.DEFINE_string('classifier_weights', None, "Weights to initialise the CLIP classification dense layer with")
 flags.DEFINE_string('export_dir', None, "Export directory to write saved model files into (created if doesn't exist)")
 flags.DEFINE_boolean('overwrite_export_dir', False, "Delete and recreate the export directory if it exists")
-flags.DEFINE_string('image_size', '640x640', "Expected input image width and height separated by 'x'")
-flags.DEFINE_boolean('include_mask', False, "Include prediction of segmentation masks as one of the model outputs")
+flags.DEFINE_integer('image_size', 640, "Model input image dimensions (should be divisible by 2^params.architecture.max_level)")
+flags.DEFINE_boolean('output_backbone_input', False, "Include model output: Backbone input tensor")
+flags.DEFINE_boolean('output_fpn_features', False, "Include model output: FPN features per level")
+flags.DEFINE_boolean('output_roi_boxes', False, "Include model output: RoI boxes and scores")
+flags.DEFINE_boolean('output_roi_features', False, "Include model output: RoI features")
+flags.DEFINE_boolean('output_boxes', True, "Include model output: Detected object bounding boxes")
+flags.DEFINE_boolean('output_clip_features', False, "Include model output: CLIP features per detected object")
+flags.DEFINE_boolean('output_class_probs', False, "Include model output: Object class probabilities")
+flags.DEFINE_boolean('output_classes', True, "Include model output: Predicted object classes and scores")
+flags.DEFINE_boolean('output_masks', False, "Include model output: Object segmentation masks")
 flags.mark_flag_as_required('checkpoint_path')
 flags.mark_flag_as_required('classifier_weights')
 flags.mark_flag_as_required('export_dir')
@@ -39,32 +50,68 @@ flags.mark_flag_as_required('export_dir')
 # Main function
 # noinspection PyUnusedLocal
 def main(argv):
-	image_width_str, image_height_str = FLAGS.image_size.split('x')
 	export(
 		config_file=FLAGS.config_file,
 		params_override=FLAGS.params_override,
 		resnet_depth=FLAGS.resnet_depth,
+		fast_version=FLAGS.fast_version,
 		checkpoint_path=FLAGS.checkpoint_path,
 		classifier_weights=FLAGS.classifier_weights,
 		export_dir=FLAGS.export_dir,
 		overwrite_export_dir=FLAGS.overwrite_export_dir,
-		image_size=(int(image_height_str), int(image_width_str)),
-		include_mask=FLAGS.include_mask,
+		image_size=(FLAGS.image_size, FLAGS.image_size),
+		output_backbone_input=FLAGS.output_backbone_input,
+		output_fpn_features=FLAGS.output_fpn_features,
+		output_roi_boxes=FLAGS.output_roi_boxes,
+		output_roi_features=FLAGS.output_roi_features,
+		output_boxes=FLAGS.output_boxes,
+		output_clip_features=FLAGS.output_clip_features,
+		output_class_probs=FLAGS.output_class_probs,
+		output_classes=FLAGS.output_classes,
+		output_masks=FLAGS.output_masks,
 	)
 
 # Export checkpoint as saved model
-def export(config_file, params_override, resnet_depth, checkpoint_path, classifier_weights, export_dir, overwrite_export_dir, image_size, include_mask):
+def export(
+	config_file,
+	params_override,
+	resnet_depth,
+	fast_version,
+	checkpoint_path,
+	classifier_weights,
+	export_dir,
+	overwrite_export_dir,
+	image_size,
+	output_backbone_input,
+	output_fpn_features,
+	output_roi_boxes,
+	output_roi_features,
+	output_boxes,
+	output_clip_features,
+	output_class_probs,
+	output_classes,
+	output_masks,
+):
 
 	export_dir_exists = os.path.exists(export_dir)
 	print("Exporting ViLD checkpoint as saved model:")
 	print(f"  Config file: {config_file}")
 	print(f"  Params override: {params_override if params_override else '<none>'}")
 	print(f"  ResNet depth: {resnet_depth}")
+	print(f"  Fast version: {fast_version}")
 	print(f"  Input checkpoint: {checkpoint_path}.*")
 	print(f"  Classifier weights: {classifier_weights}")
 	print(f"  Export dir: {export_dir}{' [OVERWRITE]' if overwrite_export_dir and export_dir_exists else ''}")
 	print(f"  Image size: {image_size[1]}x{image_size[0]}")
-	print(f"  Include mask: {include_mask}")
+	print(f"  Output backbone input: {output_backbone_input}")
+	print(f"  Output FPN features: {output_fpn_features}")
+	print(f"  Output RoI boxes: {output_roi_boxes}")
+	print(f"  Output RoI features: {output_roi_features}")
+	print(f"  Output boxes: {output_boxes}")
+	print(f"  Output CLIP features: {output_clip_features}")
+	print(f"  Output class probs: {output_class_probs}")
+	print(f"  Output classes: {output_classes}")
+	print(f"  Output masks: {output_masks}")
 	print()
 
 	tensorflow_control_flow_util.enable_control_flow_v2()
@@ -83,11 +130,11 @@ def export(config_file, params_override, resnet_depth, checkpoint_path, classifi
 		params = hyperparameters.params_dict.override_params_dict(params, params_override, is_strict=False)
 
 	params.override({
-		'architecture': {'use_bfloat16': False, 'include_mask': include_mask},
+		'architecture': {'use_bfloat16': False, 'include_mask': output_masks},
 		'eval': {'eval_batch_size': 1},
 		'frcnn_class_loss': {'mask_rare': False},
 		'frcnn_head': {'classifier_weight_path': classifier_weights},
-		'postprocess': {'mask_rare': False},
+		'postprocess': {'fast_version': fast_version, 'mask_rare': False},
 		'predict': {'predict_batch_size': 1},
 		'resnet': {'resnet_depth': resnet_depth},
 		'train': {'train_batch_size': 1},
@@ -101,21 +148,30 @@ def export(config_file, params_override, resnet_depth, checkpoint_path, classifi
 	print()
 
 	print("Creating serving input receiver function...")
-	serving_input_receiver_fn = functools.partial(serving_input_fn, image_size=image_size, max_level=params.architecture.max_level)
+	serving_input_receiver_fn = functools.partial(
+		serving_input_fn,
+		image_size=image_size,                        # ImageTensor: 1xHxWx3 uint8 representing RGB image tensor with values in 0-255
+		max_level=params.architecture.max_level,
+	)
 	print("Creating serving model function...")
-	serving_model_fn = serving.detection.serving_model_fn_builder(  # TODO: Need to change something here to customise which outputs are served
-		export_tpu_model=False,
-		output_image_info=True,
-		output_normalized_coordinates=False,
-		cast_num_detections_to_float=False,
-		cast_detection_classes_to_float=False,
+	serving_model_outputs_fn = functools.partial(
+		serving_model_fn,
+		output_backbone_input=output_backbone_input,  # BackboneInput: 1xIxIx3 float representing normalised (approx zero mean and unit std dev) image tensor that is passed into the model backbone
+		output_fpn_features=output_fpn_features,      # FPNFeaturesLevel{L}: 1xSxSxF float representing the FPN features for level L of the model backbone
+		output_roi_boxes=output_roi_boxes,            # RPNRoIBoxes/RPNRoIScores: 1xRx4 float representing the regions of interest in the image (Format: {ymin, xmin, ymax, xmax} per rectangular region) / 1xNx1 float of objectness probability scores
+		output_roi_features=output_roi_features,      # RPNRoIFeatures: 1xRxTxTxF float representing the FPN features for each region of interest (interpolated from the most appropriate level)
+		output_boxes=output_boxes,                    # DetBoxes: 1xNx4 float representing regressed detected object bounding boxes (Format: {ymin, xmin, ymax, xmax} per rectangular region)
+		output_clip_features=output_clip_features,    # DetCLIPFeatures: 1xNxC float representing the projected CLIP-comparable features for each detection
+		output_class_probs=output_class_probs,        # DetClassProbs: 1xNxK float representing the class probabilities (including background) for each detection
+		output_classes=output_classes,                # DetClasses/DetScores: 1xN integer representing the predicted class for each detection (may be background) / 1xN float representing the predicted class scores (probabilities) for each detection (guaranteed to be in decreasing order)
+		output_masks=output_masks,                    # DetMasks: 1xNxMxM float representing the object segmentation mask (as probabilities) for each detection
 	)
 	print("Done")
 	print()
 
 	print("Creating TPU estimator...")
 	estimator = tf.estimator.tpu.TPUEstimator(
-		model_fn=serving_model_fn,
+		model_fn=serving_model_outputs_fn,
 		model_dir=None,
 		config=tf.estimator.tpu.RunConfig(
 			tpu_config=tf.estimator.tpu.TPUConfig(iterations_per_loop=1),
@@ -180,6 +236,63 @@ def serving_input_fn(image_size, max_level):
 		features={'images': images, 'image_info': images_info},
 		receiver_tensors={'image_tensor': image_placeholder},
 	)
+
+# Serving model function
+# noinspection PyUnusedLocal
+def serving_model_fn(
+	features, labels, mode, params,
+	output_backbone_input,
+	output_fpn_features,
+	output_roi_boxes,
+	output_roi_features,
+	output_boxes,
+	output_clip_features,
+	output_class_probs,
+	output_classes,
+	output_masks,
+):
+
+	if mode != tf.estimator.ModeKeys.PREDICT:
+		raise ValueError(f"Mode must be PREDICT: {mode}")
+
+	image_info = features['image_info']
+	backbone_input = features['images']
+
+	params = hyperparameters.params_dict.ParamsDict(params)
+	model_outputs = vild_model.ViLDModel(params).build_outputs(backbone_input, labels={'image_info': image_info}, mode=dataloader.mode_keys.PREDICT)
+
+	predictions = {
+		'image_info': tf.identity(features['image_info'], 'ImageInfo'),
+		'det_count': tf.identity(model_outputs['num_detections'], 'NumDetections'),
+	}
+
+	if output_backbone_input:
+		predictions['backbone_input'] = tf.identity(backbone_input, 'BackboneInput')
+	if output_fpn_features:
+		for level, fpn_features in model_outputs['fpn_features'].items():
+			predictions[f'fpn_features_level{level}'] = tf.identity(fpn_features, f'FPNFeaturesLevel{level}')
+	if output_roi_boxes:
+		predictions.update(
+			rpn_roi_boxes=tf.identity(model_outputs['rpn_rois'], 'RPNRoIBoxes'),
+			rpn_roi_scores=tf.identity(model_outputs['rpn_roi_scores'], 'RPNRoIScores'),
+		)
+	if output_roi_features:
+		predictions['rpn_roi_features'] = tf.identity(model_outputs['roi_features'], 'RPNRoIFeatures')
+	if output_boxes:
+		predictions['det_boxes'] = tf.identity(model_outputs['detection_boxes'], 'DetBoxes')
+	if output_clip_features:
+		predictions['det_clip_features'] = tf.identity(model_outputs['detection_feat'], 'DetCLIPFeatures')
+	if output_class_probs:
+		predictions['det_class_probs'] = tf.identity(model_outputs['detection_probs'], 'DetClassProbs')
+	if output_classes:
+		predictions.update(
+			det_classes=tf.identity(model_outputs['detection_classes'], 'DetClasses'),
+			det_scores=tf.identity(model_outputs['detection_scores'], 'DetScores'),
+		)
+	if output_masks:
+		predictions['det_masks'] = tf.identity(model_outputs['detection_masks'], 'DetMasks')
+
+	return tf.estimator.EstimatorSpec(mode=mode, predictions=predictions)
 
 # Run main function
 if __name__ == '__main__':

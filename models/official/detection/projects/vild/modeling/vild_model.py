@@ -105,6 +105,7 @@ class ViLDModel(base_model.BaseModel):
 
     backbone_features = self._backbone_fn(images, is_training)
     fpn_features = self._fpn_fn(backbone_features, is_training)
+    model_outputs['fpn_features'] = fpn_features
 
     rpn_score_outputs, rpn_box_outputs = self._rpn_head_fn(
         fpn_features, is_training)
@@ -112,12 +113,16 @@ class ViLDModel(base_model.BaseModel):
         'rpn_score_outputs': rpn_score_outputs,
         'rpn_box_outputs': rpn_box_outputs,
     })
-    rpn_rois, _ = self._generate_rois_fn(
+    rpn_rois, rpn_roi_scores = self._generate_rois_fn(
         rpn_box_outputs,
         rpn_score_outputs,
         anchor_boxes,
         labels['image_info'][:, 1, :],
         is_training)
+    model_outputs.update({
+        'rpn_rois': rpn_rois,
+        'rpn_roi_scores': rpn_roi_scores,
+    })
 
     if is_training:
       rpn_rois = tf.stop_gradient(rpn_rois)
@@ -161,6 +166,7 @@ class ViLDModel(base_model.BaseModel):
 
     roi_features = spatial_transform_ops.multilevel_crop_and_resize(
         fpn_features, rpn_rois, output_size=7)
+    model_outputs['roi_features'] = roi_features
 
     if is_training and self._feat_distill:
       tf.logging.info(f'rois before split: {rpn_rois}')
@@ -168,10 +174,7 @@ class ViLDModel(base_model.BaseModel):
           rpn_rois, [num_rois_before_cat, self._max_distill_rois], axis=1)
       tf.logging.info(f'rois after split: {rpn_rois}')
 
-    (class_outputs,
-     box_outputs,
-     distill_feat_outputs,
-     distill_class_outputs) = self._frcnn_head_fn(roi_features, is_training)
+    box_outputs, feat_outputs, class_outputs, distill_feat_outputs, distill_class_outputs = self._frcnn_head_fn(roi_features, is_training)
     model_outputs.update({
         'class_outputs': class_outputs,
         'box_outputs': box_outputs,

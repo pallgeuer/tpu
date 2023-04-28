@@ -2,22 +2,33 @@
 # Inference a ViLD saved model
 
 # Imports
+import re
 import csv
 import time
 from absl import flags
+from typing import Any
 import numpy as np
 import cv2
 import tensorflow.compat.v1 as tf  # noqa
+from tensorflow.core.framework.types_pb2 import DataType as TensorDataType  # noqa
+from tensorflow.python.ops import control_flow_util as tensorflow_control_flow_util
 import utils.box_utils
 import utils.mask_utils
 import utils.input_utils
 import utils.object_detection.visualization_utils
+
+# Constants
+LINE_THICKNESS = 3
 
 # Command line flags
 FLAGS = flags.FLAGS
 flags.DEFINE_string('saved_model_dir', None, "Saved model directory to inference")
 flags.DEFINE_string('class_map', None, "LVIS class ID to name mapping file (each line contains e.g. '19:armchair', IDs are 1-indexed, should be 1203 of them)")
 flags.DEFINE_multi_string('image', None, "Input image file path(s)")
+flags.DEFINE_boolean('graph_opt', True, "Perform graph optimisation on loaded model")
+flags.DEFINE_integer('max_boxes', 50, "Maximum number of RoI/detection boxes to draw")
+flags.DEFINE_float('min_score_roi', 0.2, "Minimum score in order to draw a RoI box")
+flags.DEFINE_float('min_score_det', 0.2, "Minimum score in order to draw a detection box")
 flags.mark_flag_as_required('saved_model_dir')
 flags.mark_flag_as_required('image')
 
@@ -28,18 +39,41 @@ def main(argv):
 		saved_model_dir=FLAGS.saved_model_dir,
 		class_map_path=FLAGS.class_map,
 		image_paths=FLAGS.image,
+		graph_opt=FLAGS.graph_opt,
+		max_boxes=FLAGS.max_boxes,
+		min_score_roi=FLAGS.min_score_roi,
+		min_score_det=FLAGS.min_score_det,
 	)
 
 # Inference saved model on image path
-def inference(saved_model_dir, class_map_path, image_paths):
-
-	# TODO: Disable V2 features like for exporting the model (I ACTIVATE stuff there, not deactivate?)? Does that help in any way?
+def inference(
+	saved_model_dir,
+	class_map_path,
+	image_paths,
+	graph_opt,
+	max_boxes,
+	min_score_roi,
+	min_score_det,
+):
 
 	print("Inferencing saved model on image:")
 	print(f"  Saved model: {saved_model_dir}")
-	for image_path in image_paths:
-		print(f"  Image: {image_path}")
+	print(f"  Class map: {class_map_path}")
+	if not image_paths:
+		raise ValueError("Must provide at least one image to inference on")
+	elif len(image_paths) == 1:
+		print(f"  Image: {image_paths[0]}")
+	else:
+		print("  Images:")
+		for image_path in image_paths:
+			print(f"    {image_path}")
+	print(f"  Optimise graph: {graph_opt}")
+	print(f"  Max draw boxes: {max_boxes}")
+	print(f"  Min RoI score: {min_score_roi}")
+	print(f"  Min det score: {min_score_det}")
 	print()
+
+	tensorflow_control_flow_util.enable_control_flow_v2()
 
 	if class_map_path:
 		print('Loading LVIS base class label map...')
@@ -57,97 +91,212 @@ def inference(saved_model_dir, class_map_path, image_paths):
 		class_map = {i: {'id': i, 'name': str(i)} for i in range(1, 1204)}
 
 	print("Starting TensorFlow session...")
-	session_config = tf.ConfigProto(log_device_placement=False)  # TODO: TEMP
+
+	session_config = tf.ConfigProto()
 	session_config.gpu_options.allow_growth = True
-	session_config.graph_options.optimizer_options.opt_level = -1  # TODO: Does this disable grappler? Doesn't seem so
-	session_config.graph_options.rewrite_options.disable_meta_optimizer = True  # TODO: Does this disable grappler? --> 30s startup time instead of ~4-5min and 2.67s inference instead of 2.89s after Grappler
-	with tf.Session(graph=tf.Graph(), config=session_config) as session:  # TODO: , session.graph.device('/cpu:0'):
+	if not graph_opt:
+		session_config.graph_options.optimizer_options.opt_level = -1
+		session_config.graph_options.rewrite_options.disable_meta_optimizer = True
+
+	with tf.Session(graph=tf.Graph(), config=session_config) as session:
+
 		print("Done")
 		print()
 
 		print("Loading saved model...")
 		meta_graph_def = tf.saved_model.load(session, [tf.saved_model.tag_constants.SERVING], saved_model_dir)
 		session.graph.finalize()
+		print("Done")
+		print()
+
+		print("Inspecting loaded model...")
 		serving_def = meta_graph_def.signature_def['serving_default']
-		print(serving_def.inputs, type(serving_def.inputs))
 		sig_inputs = dict(serving_def.inputs)
 		sig_outputs = dict(serving_def.outputs)
-		input_node = sig_inputs['image_tensor']
-		output_nodes = {
-			'image_info': sig_outputs['image_info'].name,
-			'num_detections': sig_outputs['num_detections'].name,
-			'detection_boxes': sig_outputs['detection_boxes'].name,
-			'detection_classes': sig_outputs['detection_classes'].name,
-			'detection_scores': sig_outputs['detection_scores'].name,
-		}
-		if include_mask := 'detection_masks' in sig_outputs:
-			output_nodes['detection_masks'] = sig_outputs['detection_masks'].name
+		print_tensor_map('Input', sig_inputs)
+		print_tensor_map('Output', sig_outputs)
+		input_node = sig_inputs.get('image_tensor', None)
+		if input_node is None:
+			raise RuntimeError("A model with 'image_tensor' as an input is required for inference")
+		output_nodes = {name: sig_outputs[name].name for name in sig_outputs}
 		print("Done")
 		print()
 
 		for image_path in image_paths:
 
-			print(f"Inference saved model on image: {image_path}")
+			print(f"Inferencing saved model on image: {image_path}")
 
-			raw_image_bgr = cv2.imread(image_path, flags=cv2.IMREAD_COLOR).astype(np.uint8)
-			raw_image_rgb = cv2.cvtColor(raw_image_bgr, cv2.COLOR_BGR2RGB)
-			print(raw_image_rgb.shape, raw_image_rgb.dtype)
+			image_bgr = cv2.imread(image_path, flags=cv2.IMREAD_COLOR).astype(np.uint8)
+			cv2.imshow('Input image', image_bgr)
+			cv2.waitKey(1)
 
-			# TODO: Avoid performing the graph optimisation every time?? (https://stackoverflow.com/questions/74219568/optimize-and-resave-saved-model-with-grappler)
-			# TODO: Optimise model evaluation time (remove masks, do not perform base class estimation at all, literally just return visual features?, Reduce number of object RoIs that have their visual features computed - just the 20 most objecty ones?)
 			start_time = time.perf_counter()
-			output_results = session.run(output_nodes, feed_dict={input_node.name: raw_image_rgb[None, ...]})
-			stop_time = time.perf_counter()
-			print(f"Elapsed: {stop_time - start_time:.3f}")
-			import pprint
-			pprint.pprint(output_results)
-
-			num_detections = int(output_results['num_detections'][0])
-			print(num_detections)
-			np_boxes = output_results['detection_boxes'][0, :num_detections]
-			print('D', np_boxes)
-			np_image_info = output_results['image_info'][0]
-			np_boxes = np_boxes / np.tile(np_image_info[1:2, :], (1, 2))  # TODO: Better to just divide by 2:3 (scale factor) (scaled image is top-left aligned with padded image)
-			print('E', np_boxes)
-			ymin, xmin, ymax, xmax = np.split(np_boxes, 4, axis=-1)
-			ymin = ymin * 1280
-			ymax = ymax * 1280
-			xmin = xmin * 1280
-			xmax = xmax * 1280
-			np_boxes = np.concatenate([ymin, xmin, ymax, xmax], axis=-1)
-			print('F', np_boxes)
-			np_scores = output_results['detection_scores'][0, :num_detections]
-			print(np_scores)
-			np_classes = output_results['detection_classes'][0, :num_detections]
-			np_classes = np_classes.astype(np.int32)
-			print('H', np_classes)
-			if include_mask:
-				np_masks = output_results['detection_masks'][0, :num_detections]
-				print(np_masks.shape)
-				np_masks = utils.mask_utils.paste_instance_masks(np_masks, utils.box_utils.yxyx_to_xywh(np_boxes), 960, 1280)
-				print('J', np_masks.shape)
-			else:
-				np_masks = None
-
-			image_with_detections = (
-				utils.object_detection.visualization_utils.visualize_boxes_and_labels_on_image_array(
-					raw_image_bgr,
-					np_boxes,
-					np_classes,
-					np_scores,
-					class_map,
-					instance_masks=np_masks,
-					use_normalized_coordinates=False,
-					max_boxes_to_draw=30,
-					min_score_thresh=0.05))
-
-			cv2.imshow('Detections', image_with_detections)
-			cv2.waitKey(0)
-
-			print("Done")
+			output_results = session.run(output_nodes, feed_dict={input_node.name: image_bgr[None, :, :, ::-1]})
+			print(f"Inference runtime: {time.perf_counter() - start_time:.3f}")
 			print()
 
+			if (image_info := output_results.get('image_info', None)[0]) is not None:
+
+				input_width = round(image_info[0, 1])
+				input_height = round(image_info[0, 0])
+				print(f"Target size: {round(image_info[1, 1])}x{round(image_info[1, 0])}")
+				print(f"Input size:  {input_width}x{input_height}")
+				print(f"Scaled size: {round(image_info[0, 1] * image_info[2, 1])}x{round(image_info[0, 0] * image_info[2, 0])}")
+				print(f"Padded size: {round(image_info[4, 1])}x{round(image_info[4, 0])} (top-left aligned)")
+				if image_info[3, 1] != 0 or image_info[3, 0] != 0:
+					raise RuntimeError(f"Internal image translation is always assumed to be zero: ({image_info[3, 1]}, {image_info[3, 0]})")
+				print()
+
+				if (backbone_input := output_results.get('backbone_input', None)[0]) is not None:
+					print(f"Backbone input size: {shape_str(backbone_input)} (RGB)")
+					print(f"Backbone input min: {backbone_input.min(axis=(0, 1))}")
+					print(f"Backbone input mean: {backbone_input.mean(axis=(0, 1))}")
+					print(f"Backbone input max: {backbone_input.max(axis=(0, 1))}")
+					print(f"Backbone input zero: {np.mean(np.all(backbone_input == 0, axis=2)):.1%}")
+					cv2.imshow('Backbone input', np.rint(255 * (backbone_input * np.array((0.229, 0.224, 0.225)) + np.array((0.485, 0.456, 0.406)))).clip(0, 255).astype(np.uint8)[:, :, ::-1])
+					print()
+
+				have_fpn_features = False
+				for key, fpn_features in sorted(output_results.items()):
+					if match := re.fullmatch(r'fpn_features_level([0-9]+)', key):
+						print(f"FPN features level {match.group(1)}: {shape_str(fpn_features[0])}")
+						have_fpn_features = True
+				if have_fpn_features:
+					print()
+
+				if (rpn_roi_scores := output_results.get('rpn_roi_scores', None)[0]) is not None:
+					print(f"RPN RoI scores: {shape_str(rpn_roi_scores)}")
+					print(f"RPN RoI scores min: {rpn_roi_scores.min()}")
+					print(f"RPN RoI scores max: {rpn_roi_scores.max()}")
+					print()
+
+				if (rpn_roi_boxes := output_results.get('rpn_roi_boxes', None)[0]) is not None:
+					rpn_roi_boxes = rpn_roi_boxes / np.tile(image_info[2:3, :], reps=(1, 2))
+					print(f"RPN RoI boxes: {shape_str(rpn_roi_boxes)}")
+					print(f"RPN RoI boxes format: [ymin xmin ymax xmax] relative to {input_width}x{input_height} input image")
+					print(f"RPN RoI boxes min: {rpn_roi_boxes.min(axis=0)}")
+					print(f"RPN RoI boxes max: {rpn_roi_boxes.max(axis=0)}")
+					# TODO: Use rpn_roi_scores and show image
+					print()
+
+				if (rpn_roi_features := output_results.get('rpn_roi_features', None)[0]) is not None:
+					print(f"RPN RoI features: {shape_str(rpn_roi_features)}")
+					print(f"RPN RoI features min: {rpn_roi_features.min()}")
+					print(f"RPN RoI features mean: {rpn_roi_features.mean()}")
+					print(f"RPN RoI features std: {rpn_roi_features.std()}")
+					print(f"RPN RoI features max: {rpn_roi_features.max()}")
+					print()
+
+				if (det_count := output_results.get('det_count', None)[0]) is not None:
+					print(f"Num detections: {det_count}")
+					print()
+
+				if (det_clip_features := output_results.get('det_clip_features', None)[0]) is not None:
+					if det_count is not None:
+						det_clip_features = det_clip_features[:det_count]
+					print(f"Det CLIP features: {shape_str(det_clip_features)}")
+					det_clip_features_norm: Any = np.linalg.norm(det_clip_features, axis=1)
+					print(f"Det CLIP features norm min: {det_clip_features_norm.min()}")
+					print(f"Det CLIP features norm mean: {det_clip_features_norm.mean()}")
+					print(f"Det CLIP features norm max: {det_clip_features_norm.max()}")
+					print()
+
+				if (det_class_probs := output_results.get('det_class_probs', None)[0]) is not None:
+					if det_count is not None:
+						det_class_probs = det_class_probs[:det_count]
+					print(f"Det class probs: {shape_str(det_class_probs)}")
+					det_class_max_prob = det_class_probs.max(axis=1)
+					print(f"Det class probs min: {det_class_probs.min()}")
+					print(f"Det class probs max: {det_class_probs.max()}")
+					print(f"Det class background min: {det_class_probs[0].min()}")
+					print(f"Det class background max: {det_class_probs[0].max()}")
+					print(f"Det class max-prob min: {det_class_max_prob.min()}")
+					print(f"Det class max-prob mean: {det_class_max_prob.mean()}")
+					print(f"Det class max-prob max: {det_class_max_prob.max()}")
+					print()
+
+				if (det_classes := output_results.get('det_classes', None)[0]) is not None:
+					if det_count is not None:
+						det_classes = det_classes[:det_count]
+					print(f"Det classes: {shape_str(det_classes)}")
+					print(f"Det classes min: {det_classes.min()}")
+					print(f"Det classes max: {det_classes.max()}")
+					print()
+
+				if (det_scores := output_results.get('det_scores', None)[0]) is not None:
+					if det_count is not None:
+						det_scores = det_scores[:det_count]
+					print(f"Det scores: {shape_str(det_scores)}")
+					print(f"Det scores min: {det_scores.min()}")
+					print(f"Det scores max: {det_scores.max()}")
+					print()
+
+				if (det_masks := output_results.get('det_masks', None)[0]) is not None:
+					if det_count is not None:
+						det_masks = det_masks[:det_count]
+					print(f"Det masks: {shape_str(det_masks)}")
+					print(f"Det masks value min: {det_masks.min()}")
+					print(f"Det masks value max: {det_masks.max()}")
+					det_masks_fill = det_masks.mean(axis=(1, 2))
+					print(f"Det masks fill min: {det_masks_fill.min():.1%}")
+					print(f"Det masks fill max: {det_masks_fill.max():.1%}")
+					print()
+
+				if (det_boxes := output_results.get('det_boxes', None)[0]) is not None:
+					if det_count is not None:
+						det_boxes = det_boxes[:det_count]
+					det_boxes = det_boxes / np.tile(image_info[2:3, :], reps=(1, 2))
+					print(f"Det boxes: {shape_str(det_boxes)}")
+					print(f"Det boxes format: [ymin xmin ymax xmax] relative to {input_width}x{input_height} input image")
+					print(f"Det boxes min: {det_boxes.min(axis=0)}")
+					print(f"Det boxes max: {det_boxes.max(axis=0)}")
+					instance_masks = utils.mask_utils.paste_instance_masks(det_masks, utils.box_utils.yxyx_to_xywh(det_boxes), input_height, input_width) if det_masks is not None else None
+					cv2.imshow('Detections', utils.object_detection.visualization_utils.visualize_boxes_and_labels_on_image_array(
+						image=image_bgr.copy(),
+						boxes=det_boxes,
+						classes=det_classes,
+						agnostic_mode=det_classes is None,
+						scores=det_scores if det_scores is not None else np.ones(det_boxes.shape[0], dtype=np.float32),
+						category_index=class_map,
+						instance_masks=instance_masks,
+						use_normalized_coordinates=False,
+						max_boxes_to_draw=max_boxes,
+						min_score_thresh=min_score_det,
+						line_thickness=LINE_THICKNESS,
+					))
+					num_boxes = det_boxes.shape[0]
+					if det_scores is None:
+						if num_boxes <= max_boxes:
+							print(f"Annotated {num_boxes} det boxes")
+						else:
+							print(f"Annotated {max_boxes} (limit) det boxes")
+					else:
+						scored_boxes = np.searchsorted(-det_scores, -min_score_det, side='left')
+						if scored_boxes <= 0:
+							print(f"Annotated 0 det boxes (none are above score of {min_score_det:.1%})")
+						elif scored_boxes > max_boxes:
+							print(f"Annotated {max_boxes} (limit) det boxes down to a score of {det_scores[scored_boxes - 1]:.1%}")
+						elif scored_boxes < num_boxes:
+							print(f"Annotated {scored_boxes} det boxes down to a score of {det_scores[scored_boxes - 1]:.1%} (limit)")
+						else:
+							print(f"Annotated {scored_boxes} det boxes down to a score of {det_scores[scored_boxes - 1]:.1%}")
+					print()
+
+			cv2.waitKey(0)
+
 		cv2.destroyAllWindows()
+
+# Shape to string
+def shape_str(array):
+	return 'x'.join(str(dim) for dim in array.shape)
+
+# Print a tensor map
+TF_TYPE_MAP = {value: key for (key, value) in TensorDataType.items()}
+def print_tensor_map(name, tensor_map):
+	max_key_len = max(len(key) for key in tensor_map.keys())
+	max_name_len = max(len(tensor.name) for tensor in tensor_map.values())
+	for key, tensor in sorted(tensor_map.items()):
+		print(f"{name}[{key:{max_key_len}s}] = {tensor.name:{max_name_len}s} ==> {TF_TYPE_MAP[tensor.dtype]:8s} {'x'.join('?' if dim.size < 0 else str(dim.size) for dim in tensor.tensor_shape.dim)}")
 
 # Run main function
 if __name__ == '__main__':
