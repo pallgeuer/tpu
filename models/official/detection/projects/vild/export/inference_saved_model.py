@@ -211,11 +211,9 @@ def inference(
 					if det_count is not None:
 						det_class_probs = det_class_probs[:det_count]
 					print(f"Det class probs: {shape_str(det_class_probs)}")
-					det_class_max_prob = det_class_probs.max(axis=1)
 					print(f"Det class probs min: {det_class_probs.min()}")
 					print(f"Det class probs max: {det_class_probs.max()}")
-					print(f"Det class background min: {det_class_probs[0].min()}")
-					print(f"Det class background max: {det_class_probs[0].max()}")
+					det_class_max_prob = det_class_probs.max(axis=1)
 					print(f"Det class max-prob min: {det_class_max_prob.min()}")
 					print(f"Det class max-prob mean: {det_class_max_prob.mean()}")
 					print(f"Det class max-prob max: {det_class_max_prob.max()}")
