@@ -97,9 +97,10 @@ def _generate_detections_v1(boxes,
     nmsed_classes = []
     nmsed_scores = []
     valid_detections = []
+    nmsed_indices = []
     for i in range(batch_size):
       (nmsed_boxes_i, nmsed_scores_i, nmsed_classes_i,
-       valid_detections_i) = _generate_detections_per_image(
+       valid_detections_i, nmsed_indices_i) = _generate_detections_per_image(
            boxes[i],
            scores[i],
            max_total_size,
@@ -110,11 +111,13 @@ def _generate_detections_v1(boxes,
       nmsed_scores.append(nmsed_scores_i)
       nmsed_classes.append(nmsed_classes_i)
       valid_detections.append(valid_detections_i)
+      nmsed_indices.append(nmsed_indices_i)
   nmsed_boxes = tf.stack(nmsed_boxes, axis=0)
   nmsed_scores = tf.stack(nmsed_scores, axis=0)
   nmsed_classes = tf.stack(nmsed_classes, axis=0)
   valid_detections = tf.stack(valid_detections, axis=0)
-  return nmsed_boxes, nmsed_scores, nmsed_classes, valid_detections
+  nmsed_indices = tf.stack(nmsed_indices, axis=0)
+  return nmsed_boxes, nmsed_scores, nmsed_classes, valid_detections, nmsed_indices
 
 
 def _generate_detections_per_image(boxes,
@@ -152,6 +155,7 @@ def _generate_detections_per_image(boxes,
     valid_detections: `int` Tensor of shape [1] only the top `valid_detections`
       boxes are valid detections.
   """
+  nmsed_indices = []
   nmsed_boxes = []
   nmsed_scores = []
   nmsed_classes = []
@@ -182,21 +186,24 @@ def _generate_detections_per_image(boxes,
         tf.less(tf.range(max_total_size), [nmsed_num_valid_i]),
         nmsed_scores_i, -tf.ones_like(nmsed_scores_i))
     nmsed_classes_i = tf.fill([max_total_size], i)
+    nmsed_indices.append(tf.gather(indices, nmsed_indices_i))
     nmsed_boxes.append(nmsed_boxes_i)
     nmsed_scores.append(nmsed_scores_i)
     nmsed_classes.append(nmsed_classes_i)
 
   # Concats results from all classes and sort them.
+  nmsed_indices = tf.concat(nmsed_indices, axis=0)
   nmsed_boxes = tf.concat(nmsed_boxes, axis=0)
   nmsed_scores = tf.concat(nmsed_scores, axis=0)
   nmsed_classes = tf.concat(nmsed_classes, axis=0)
   nmsed_scores, indices = tf.nn.top_k(
       nmsed_scores, k=max_total_size, sorted=True)
+  nmsed_indices = tf.gather(nmsed_indices, indices)
   nmsed_boxes = tf.gather(nmsed_boxes, indices)
   nmsed_classes = tf.gather(nmsed_classes, indices)
   valid_detections = tf.reduce_sum(
       tf.cast(tf.greater(nmsed_scores, -1), tf.int32))
-  return nmsed_boxes, nmsed_scores, nmsed_classes, valid_detections
+  return nmsed_boxes, nmsed_scores, nmsed_classes, valid_detections, nmsed_indices
 
 
 def _select_top_k_scores(scores_in, pre_nms_num_detections):
@@ -424,7 +431,7 @@ class MultilevelDetectionGenerator(object):
           'raw_scores': scores,
       }
 
-    nmsed_boxes, nmsed_scores, nmsed_classes, valid_detections = (
+    nmsed_boxes, nmsed_scores, nmsed_classes, valid_detections, nmsed_indices = (
         self._generate_detections(boxes, scores))
 
     # Adds 1 to offset the background class which has index 0.
@@ -547,7 +554,7 @@ class GenericDetectionGenerator(object):
           'raw_scores': class_outputs,
       }
 
-    nmsed_boxes, nmsed_scores, nmsed_classes, valid_detections = (
+    nmsed_boxes, nmsed_scores, nmsed_classes, valid_detections, nmsed_indices = (
         self._generate_detections(decoded_boxes, class_outputs))
 
     # Adds 1 to offset the background class which has index 0.
@@ -558,4 +565,5 @@ class GenericDetectionGenerator(object):
         'detection_boxes': nmsed_boxes,
         'detection_classes': nmsed_classes,
         'detection_scores': nmsed_scores,
+        'detection_probs': tf.gather(class_outputs, nmsed_indices, axis=1, batch_dims=1),
     }
