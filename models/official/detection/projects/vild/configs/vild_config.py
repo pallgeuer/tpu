@@ -140,7 +140,6 @@ VILD_CFG.override({
         'num_mask_samples_per_image': 128,  # Typically = `num_samples_per_image` * `fg_fraction`.
     },
     'postprocess': {
-        'fast_version': False,
         'max_total_size': 300,
         'score_threshold': 0.0,
         'pre_nms_num_boxes': 1000,

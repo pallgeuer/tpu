@@ -28,7 +28,7 @@ FLAGS = flags.FLAGS
 flags.DEFINE_string('config_file', '', "JSON/YAML configuration file to use")
 flags.DEFINE_string('params_override', '', "String or JSON/YAML specifying configuration parameters to overlay on top of the loaded configuration file")
 flags.DEFINE_integer('resnet_depth', 50, "ResNet backbone depth")
-flags.DEFINE_boolean('fast_version', True, "Use custom fast version of postprocessing step in order to avoid large inference time bug")
+flags.DEFINE_boolean('apply_nms', False, "Apply non-maximum suppression (NMS) to the final detections as part of postprocessing")
 flags.DEFINE_string('checkpoint_path', None, "Input checkpoint specification (appending .index or .meta to this path should yield existing file paths)")
 flags.DEFINE_string('classifier_weights', None, "Weights to initialise the CLIP classification dense layer with")
 flags.DEFINE_string('export_dir', None, "Export directory to write saved model files into (created if doesn't exist)")
@@ -54,7 +54,7 @@ def main(argv):
 		config_file=FLAGS.config_file,
 		params_override=FLAGS.params_override,
 		resnet_depth=FLAGS.resnet_depth,
-		fast_version=FLAGS.fast_version,
+		apply_nms=FLAGS.apply_nms,
 		checkpoint_path=FLAGS.checkpoint_path,
 		classifier_weights=FLAGS.classifier_weights,
 		export_dir=FLAGS.export_dir,
@@ -76,7 +76,7 @@ def export(
 	config_file,
 	params_override,
 	resnet_depth,
-	fast_version,
+	apply_nms,
 	checkpoint_path,
 	classifier_weights,
 	export_dir,
@@ -98,7 +98,7 @@ def export(
 	print(f"  Config file: {config_file}")
 	print(f"  Params override: {params_override if params_override else '<none>'}")
 	print(f"  ResNet depth: {resnet_depth}")
-	print(f"  Fast version: {fast_version}")
+	print(f"  Apply NMS: {apply_nms}")
 	print(f"  Input checkpoint: {checkpoint_path}.*")
 	print(f"  Classifier weights: {classifier_weights}")
 	print(f"  Export dir: {export_dir}{' [OVERWRITE]' if overwrite_export_dir and export_dir_exists else ''}")
@@ -134,7 +134,7 @@ def export(
 		'eval': {'eval_batch_size': 1},
 		'frcnn_class_loss': {'mask_rare': False},
 		'frcnn_head': {'classifier_weight_path': classifier_weights},
-		'postprocess': {'fast_version': fast_version, 'mask_rare': False},
+		'postprocess': {'apply_nms': apply_nms, 'mask_rare': False},
 		'predict': {'predict_batch_size': 1},
 		'resnet': {'resnet_depth': resnet_depth},
 		'train': {'train_batch_size': 1},
