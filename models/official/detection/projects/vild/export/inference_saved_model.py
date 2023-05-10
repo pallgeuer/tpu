@@ -169,6 +169,8 @@ def inference(
 					print()
 
 				if (rpn_roi_scores := output_results.get('rpn_roi_scores', None)[0]) is not None:
+					if not np.all(np.diff(rpn_roi_scores) <= 0):
+						raise RuntimeError("RPN RoI scores must be in decreasing order")
 					print(f"RPN RoI scores: {shape_str(rpn_roi_scores)}")
 					print(f"RPN RoI scores min: {rpn_roi_scores.min()}")
 					print(f"RPN RoI scores max: {rpn_roi_scores.max()}")
@@ -228,8 +230,14 @@ def inference(
 					print()
 
 				if (det_scores := output_results.get('det_scores', None)[0]) is not None:
+					if not np.all(np.diff(det_scores) <= 0):
+						raise RuntimeError("Det scores must be in decreasing order")
 					if det_count is not None:
 						det_scores = det_scores[:det_count]
+					if det_class_probs is not None:
+						if det_classes is not None and not np.array_equal(np.squeeze(np.take_along_axis(det_class_probs, det_classes[:, None] - 1, axis=1), axis=1), det_scores):
+							raise RuntimeError("Det scores are inconsistent with combination of det class probs and det classes")
+						print(f"Det scores that are not max-prob: {np.count_nonzero(det_scores != det_class_max_prob)}/{det_scores.shape[0]}")
 					print(f"Det scores: {shape_str(det_scores)}")
 					print(f"Det scores min: {det_scores.min()}")
 					print(f"Det scores max: {det_scores.max()}")
