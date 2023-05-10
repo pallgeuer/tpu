@@ -155,15 +155,15 @@ def export(
 	)
 	print("Creating serving model function...")
 	serving_model_outputs_fn = functools.partial(
-		serving_model_fn,
+		serving_model_fn,                             # The R x RPN RoIs / N x detections are guaranteed to be sorted in descending RPNRoIScores / DetScores order respectively
 		output_backbone_input=output_backbone_input,  # BackboneInput: 1xIxIx3 float representing normalised (approx zero mean and unit std dev) image tensor that is passed into the model backbone
 		output_fpn_features=output_fpn_features,      # FPNFeaturesLevel{L}: 1xSxSxF float representing the FPN features for level L of the model backbone
-		output_roi_boxes=output_roi_boxes,            # RPNRoIBoxes/RPNRoIScores: 1xRx4 float representing the regions of interest in the image (Format: {ymin, xmin, ymax, xmax} per rectangular region) / 1xNx1 float of objectness probability scores
+		output_roi_boxes=output_roi_boxes,            # RPNRoIBoxes/RPNRoIScores: 1xRx4 float representing the regions of interest in the image (Format: {ymin, xmin, ymax, xmax} per rectangular region) / 1xR float of objectness probability scores
 		output_roi_features=output_roi_features,      # RPNRoIFeatures: 1xRxTxTxF float representing the FPN features for each region of interest (interpolated from the most appropriate level)
 		output_boxes=output_boxes,                    # DetBoxes: 1xNx4 float representing regressed detected object bounding boxes (Format: {ymin, xmin, ymax, xmax} per rectangular region)
 		output_clip_features=output_clip_features,    # DetCLIPFeatures: 1xNxC float representing the projected CLIP-comparable features for each detection
-		output_class_probs=output_class_probs,        # DetClassProbs: 1xNxK float representing the class probabilities (including background) for each detection
-		output_classes=output_classes,                # DetClasses/DetScores: 1xN integer representing the predicted class for each detection (may be background) / 1xN float representing the predicted class scores (probabilities) for each detection (guaranteed to be in decreasing order)
+		output_class_probs=output_class_probs,        # DetClassProbs: 1xNxK float representing the class probabilities (NOT including background) for each detection
+		output_classes=output_classes,                # DetClasses/DetScores: 1xN integer representing the predicted (1-indexed) class for each detection (may be background) / 1xN float representing the predicted class scores (probabilities) for each detection (guaranteed to be in decreasing order)
 		output_masks=output_masks,                    # DetMasks: 1xNxMxM float representing the object segmentation mask (as probabilities) for each detection
 	)
 	print("Done")
