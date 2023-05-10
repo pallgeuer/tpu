@@ -206,6 +206,13 @@ def export(
 	print("Done")
 	print()
 
+	print("Creating params.yaml with used config parameters...")
+	hyperparameters.params_dict.save_params_dict_to_yaml(
+		params=hyperparameters.params_dict.ParamsDict(model_params),
+		file_path=os.path.join(export_dir, 'params.yaml'),
+	)
+	print()
+
 	print("Creating variables.txt with list of saved model variables...")
 	reader = tf.train.NewCheckpointReader(os.path.join(export_dir, 'variables', 'variables'))
 	variable_shape_map = reader.get_variable_to_shape_map()
