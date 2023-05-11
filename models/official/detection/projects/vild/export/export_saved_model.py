@@ -28,6 +28,8 @@ FLAGS = flags.FLAGS
 flags.DEFINE_string('config_file', '', "JSON/YAML configuration file to use")
 flags.DEFINE_string('params_override', '', "String or JSON/YAML specifying configuration parameters to overlay on top of the loaded configuration file")
 flags.DEFINE_integer('resnet_depth', 50, "ResNet backbone depth")
+flags.DEFINE_integer('num_rois', 1000, "Number of regions of interest to select")
+flags.DEFINE_integer('num_dets', 300, "Number of object detections to select")
 flags.DEFINE_boolean('apply_nms', False, "Apply non-maximum suppression (NMS) to the final detections as part of postprocessing")
 flags.DEFINE_string('checkpoint_path', None, "Input checkpoint specification (appending .index or .meta to this path should yield existing file paths)")
 flags.DEFINE_string('classifier_weights', None, "Weights to initialise the CLIP classification dense layer with")
@@ -55,6 +57,8 @@ def main(argv):
 		config_file=FLAGS.config_file,
 		params_override=FLAGS.params_override,
 		resnet_depth=FLAGS.resnet_depth,
+		num_rois=FLAGS.num_rois,
+		num_dets=FLAGS.num_dets,
 		apply_nms=FLAGS.apply_nms,
 		checkpoint_path=FLAGS.checkpoint_path,
 		classifier_weights=FLAGS.classifier_weights,
@@ -78,6 +82,8 @@ def export(
 	config_file,
 	params_override,
 	resnet_depth,
+	num_rois,
+	num_dets,
 	apply_nms,
 	checkpoint_path,
 	classifier_weights,
@@ -101,6 +107,8 @@ def export(
 	print(f"  Config file: {config_file}")
 	print(f"  Params override: {params_override if params_override else '<none>'}")
 	print(f"  ResNet depth: {resnet_depth}")
+	print(f"  Num RoIs: {num_rois}")
+	print(f"  Num detections: {num_dets}")
 	print(f"  Apply NMS: {apply_nms}")
 	print(f"  Input checkpoint: {checkpoint_path}.*")
 	print(f"  Classifier weights: {classifier_weights}")
@@ -134,13 +142,25 @@ def export(
 		params = hyperparameters.params_dict.override_params_dict(params, params_override, is_strict=False)
 
 	params.override({
-		'architecture': {'use_bfloat16': False, 'include_mask': output_masks},
+		'architecture': {
+			'use_bfloat16': False,
+			'include_mask': output_masks,
+		},
 		'eval': {'eval_batch_size': 1},
 		'frcnn_class_loss': {'mask_rare': False},
 		'frcnn_head': {'classifier_weight_path': classifier_weights},
-		'postprocess': {'apply_nms': apply_nms, 'mask_rare': False},
+		'postprocess': {
+			'apply_nms': apply_nms,
+			'mask_rare': False,
+			'max_total_size': num_dets,
+			'pre_nms_num_boxes': num_rois,
+		},
 		'predict': {'predict_batch_size': 1},
 		'resnet': {'resnet_depth': resnet_depth},
+		'roi_proposal': {
+			'test_rpn_post_nms_top_k': num_rois,
+			'test_rpn_pre_nms_top_k': num_rois,
+		},
 		'train': {'train_batch_size': 1},
 	}, is_strict=True)
 	params.validate()
