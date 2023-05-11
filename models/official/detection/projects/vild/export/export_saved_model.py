@@ -38,10 +38,11 @@ flags.DEFINE_boolean('output_backbone_input', False, "Include model output: Back
 flags.DEFINE_boolean('output_fpn_features', False, "Include model output: FPN features per level")
 flags.DEFINE_boolean('output_roi_boxes', False, "Include model output: RoI boxes and scores")
 flags.DEFINE_boolean('output_roi_features', False, "Include model output: RoI features")
-flags.DEFINE_boolean('output_boxes', True, "Include model output: Detected object bounding boxes")
+flags.DEFINE_boolean('output_objects', False, "Include model output: Pre-classification object bounding boxes and CLIP features")
+flags.DEFINE_boolean('output_boxes', False, "Include model output: Detected object bounding boxes")
 flags.DEFINE_boolean('output_clip_features', False, "Include model output: CLIP features per detected object")
 flags.DEFINE_boolean('output_class_probs', False, "Include model output: Object class probabilities")
-flags.DEFINE_boolean('output_classes', True, "Include model output: Predicted object classes and scores")
+flags.DEFINE_boolean('output_classes', False, "Include model output: Predicted object classes and scores")
 flags.DEFINE_boolean('output_masks', False, "Include model output: Object segmentation masks")
 flags.mark_flag_as_required('checkpoint_path')
 flags.mark_flag_as_required('classifier_weights')
@@ -64,6 +65,7 @@ def main(argv):
 		output_fpn_features=FLAGS.output_fpn_features,
 		output_roi_boxes=FLAGS.output_roi_boxes,
 		output_roi_features=FLAGS.output_roi_features,
+		output_objects=FLAGS.output_objects,
 		output_boxes=FLAGS.output_boxes,
 		output_clip_features=FLAGS.output_clip_features,
 		output_class_probs=FLAGS.output_class_probs,
@@ -86,6 +88,7 @@ def export(
 	output_fpn_features,
 	output_roi_boxes,
 	output_roi_features,
+	output_objects,
 	output_boxes,
 	output_clip_features,
 	output_class_probs,
@@ -107,6 +110,7 @@ def export(
 	print(f"  Output FPN features: {output_fpn_features}")
 	print(f"  Output RoI boxes: {output_roi_boxes}")
 	print(f"  Output RoI features: {output_roi_features}")
+	print(f"  Output objects: {output_objects}")
 	print(f"  Output boxes: {output_boxes}")
 	print(f"  Output CLIP features: {output_clip_features}")
 	print(f"  Output class probs: {output_class_probs}")
@@ -155,11 +159,12 @@ def export(
 	)
 	print("Creating serving model function...")
 	serving_model_outputs_fn = functools.partial(
-		serving_model_fn,                             # The R x RPN RoIs / N x detections are guaranteed to be sorted in descending RPNRoIScores / DetScores order respectively
+		serving_model_fn,                             # The R x RPN RoIs / N x detections are guaranteed to be sorted in descending RPNRoIScores / DetScores order respectively (regressed object sorting matches RPN RoIs)
 		output_backbone_input=output_backbone_input,  # BackboneInput: 1xIxIx3 float representing normalised (approx zero mean and unit std dev) image tensor that is passed into the model backbone
 		output_fpn_features=output_fpn_features,      # FPNFeaturesLevel{L}: 1xSxSxF float representing the FPN features for level L of the model backbone
 		output_roi_boxes=output_roi_boxes,            # RPNRoIBoxes/RPNRoIScores: 1xRx4 float representing the regions of interest in the image (Format: {ymin, xmin, ymax, xmax} per rectangular region) / 1xR float of objectness probability scores
 		output_roi_features=output_roi_features,      # RPNRoIFeatures: 1xRxTxTxF float representing the FPN features for each region of interest (interpolated from the most appropriate level)
+		output_objects=output_objects,                # ObjBoxes/ObjCLIPFeatures: 1xRx4 float representing regressed object bounding boxes (Format: {ymin, xmin, ymax, xmax} per rectangular region) / 1xRxC float representing the projected CLIP-comparable features for each object
 		output_boxes=output_boxes,                    # DetBoxes: 1xNx4 float representing regressed detected object bounding boxes (Format: {ymin, xmin, ymax, xmax} per rectangular region)
 		output_clip_features=output_clip_features,    # DetCLIPFeatures: 1xNxC float representing the projected CLIP-comparable features for each detection
 		output_class_probs=output_class_probs,        # DetClassProbs: 1xNxK float representing the class probabilities (NOT including background) for each detection
@@ -252,6 +257,7 @@ def serving_model_fn(
 	output_fpn_features,
 	output_roi_boxes,
 	output_roi_features,
+	output_objects,
 	output_boxes,
 	output_clip_features,
 	output_class_probs,
@@ -268,16 +274,14 @@ def serving_model_fn(
 	params = hyperparameters.params_dict.ParamsDict(params)
 	model_outputs = vild_model.ViLDModel(params).build_outputs(backbone_input, labels={'image_info': image_info}, mode=dataloader.mode_keys.PREDICT)
 
-	predictions = {
-		'image_info': tf.identity(features['image_info'], 'ImageInfo'),
-		'det_count': tf.identity(model_outputs['num_detections'], 'NumDetections'),
-	}
+	predictions = {'image_info': tf.identity(features['image_info'], 'ImageInfo')}
 
 	if output_backbone_input:
 		predictions['backbone_input'] = tf.identity(backbone_input, 'BackboneInput')
 	if output_fpn_features:
 		for level, fpn_features in model_outputs['fpn_features'].items():
 			predictions[f'fpn_features_level{level}'] = tf.identity(fpn_features, f'FPNFeaturesLevel{level}')
+
 	if output_roi_boxes:
 		predictions.update(
 			rpn_roi_boxes=tf.identity(model_outputs['rpn_rois'], 'RPNRoIBoxes'),
@@ -285,6 +289,13 @@ def serving_model_fn(
 		)
 	if output_roi_features:
 		predictions['rpn_roi_features'] = tf.identity(model_outputs['roi_features'], 'RPNRoIFeatures')
+
+	if output_objects:
+		predictions.update(
+			obj_boxes=tf.identity(model_outputs['object_boxes'], 'ObjBoxes'),
+			obj_clip_features=tf.identity(model_outputs['object_feat'], 'ObjCLIPFeatures'),
+		)
+
 	if output_boxes:
 		predictions['det_boxes'] = tf.identity(model_outputs['detection_boxes'], 'DetBoxes')
 	if output_clip_features:
@@ -298,6 +309,8 @@ def serving_model_fn(
 		)
 	if output_masks:
 		predictions['det_masks'] = tf.identity(model_outputs['detection_masks'], 'DetMasks')
+	if any(key.startswith('det_') for key in predictions.keys()):
+		predictions['det_count'] = tf.identity(model_outputs['num_detections'], 'NumDetections')
 
 	return tf.estimator.EstimatorSpec(mode=mode, predictions=predictions)
 

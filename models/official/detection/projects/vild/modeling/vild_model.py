@@ -28,7 +28,7 @@ from modeling.architecture import factory
 from ops import roi_ops
 from ops import spatial_transform_ops
 from ops import target_ops
-from projects.vild.modeling import vild_losses
+from projects.vild.modeling import vild_losses, vild_head
 from projects.vild.ops import postprocess_ops
 from utils import box_utils
 
@@ -185,15 +185,49 @@ class ViLDModel(base_model.BaseModel):
       })
 
     if not is_training:
+      if distill_feat_outputs is None:
+        merged_feat_outputs = feat_outputs
+      else:
+        merged_feat_outputs = 2 * feat_outputs + distill_feat_outputs
+        if self._frcnn_head_fn._normalize_visual:
+          merged_feat_outputs_norm = tf.norm(merged_feat_outputs, ord=2, axis=-1, keepdims=True)
+          merged_feat_outputs = vild_head._divide_no_nan(merged_feat_outputs, merged_feat_outputs_norm)
+        else:
+          merged_feat_outputs /= 3
       detection_results = self._generate_detections_fn(
           box_outputs,
           class_outputs,
           rpn_rois,
+          merged_feat_outputs,
           labels['image_info'][:, 1:2, :],
           bbox_per_class=not self._params.frcnn_head.class_agnostic_bbox_pred,
           distill_class_outputs=distill_class_outputs,
       )
       model_outputs.update(detection_results)
+      if self._params.frcnn_head.class_agnostic_bbox_pred:
+        model_outputs.update(
+            object_boxes=tf.squeeze(detection_results['raw_boxes'], axis=2),
+            object_feat=detection_results['raw_feat'],
+        )
+      if not self._generate_detections_fn._apply_nms:
+        det_probs = detection_results['raw_probs']
+        det_classes = tf.argmax(det_probs, axis=2, output_type=tf.int32)
+        det_scores = tf.gather(det_probs, det_classes, axis=2, batch_dims=2)
+        if self._params.frcnn_head.class_agnostic_bbox_pred:
+          det_boxes = tf.squeeze(detection_results['raw_boxes'], axis=2)
+        else:
+          det_boxes = tf.gather(detection_results['raw_boxes'], det_classes, axis=2)
+        det_classes += 1
+        num_detections = tf.minimum(tf.shape(det_scores)[-1:], self._params.postprocess.max_total_size)
+        det_scores, indices = tf.nn.top_k(det_scores, k=num_detections[0], sorted=True)
+        model_outputs.update(
+            num_detections=num_detections,
+            detection_boxes=tf.gather(det_boxes, indices, axis=1, batch_dims=1),
+            detection_classes=tf.gather(det_classes, indices, axis=1, batch_dims=1),
+            detection_scores=det_scores,
+            detection_probs=tf.gather(det_probs, indices, axis=1, batch_dims=1),
+            detection_feat=tf.gather(detection_results['raw_feat'], indices, axis=1, batch_dims=1),
+        )
 
     if not self._include_mask:
       return model_outputs
@@ -211,8 +245,8 @@ class ViLDModel(base_model.BaseModel):
           'sampled_class_targets': classes,
       })
     else:
-      rpn_rois = detection_results['detection_boxes']
-      classes = tf.cast(detection_results['detection_classes'], dtype=tf.int32)
+      rpn_rois = model_outputs['detection_boxes']
+      classes = tf.cast(model_outputs['detection_classes'], dtype=tf.int32)
 
     mask_roi_features = spatial_transform_ops.multilevel_crop_and_resize(
         fpn_features, rpn_rois, output_size=14)

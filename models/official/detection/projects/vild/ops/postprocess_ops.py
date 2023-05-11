@@ -467,6 +467,7 @@ class GenericDetectionGenerator(object):
                box_outputs,
                class_outputs,
                anchor_boxes,
+               merged_feat_outputs,
                image_shape,
                regression_weights=None,
                bbox_per_class=True,
@@ -548,22 +549,22 @@ class GenericDetectionGenerator(object):
     else:
       decoded_boxes = tf.expand_dims(decoded_boxes, axis=2)
 
-    if not self._apply_nms:
-      return {
-          'raw_boxes': decoded_boxes,
-          'raw_scores': class_outputs,
-      }
-
-    nmsed_boxes, nmsed_scores, nmsed_classes, valid_detections, nmsed_indices = (
-        self._generate_detections(decoded_boxes, class_outputs))
-
-    # Adds 1 to offset the background class which has index 0.
-    nmsed_classes += 1
-
-    return {
-        'num_detections': valid_detections,
-        'detection_boxes': nmsed_boxes,
-        'detection_classes': nmsed_classes,
-        'detection_scores': nmsed_scores,
-        'detection_probs': tf.gather(class_outputs, nmsed_indices, axis=1, batch_dims=1),
+    outputs = {
+        'raw_boxes': decoded_boxes,
+        'raw_probs': class_outputs,
+        'raw_feat': merged_feat_outputs,
     }
+
+    if self._apply_nms:
+      nmsed_boxes, nmsed_scores, nmsed_classes, valid_detections, nmsed_indices = self._generate_detections(decoded_boxes, class_outputs)
+      nmsed_classes += 1  # Adds 1 to offset the background class which has index 0
+      outputs.update({
+          'num_detections': valid_detections,
+          'detection_boxes': nmsed_boxes,
+          'detection_classes': nmsed_classes,
+          'detection_scores': nmsed_scores,
+          'detection_probs': tf.gather(class_outputs, nmsed_indices, axis=1, batch_dims=1),
+          'detection_feat': tf.gather(merged_feat_outputs, nmsed_indices, axis=1, batch_dims=1),
+      })
+
+    return outputs

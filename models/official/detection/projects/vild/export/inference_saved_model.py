@@ -25,9 +25,12 @@ FLAGS = flags.FLAGS
 flags.DEFINE_string('saved_model_dir', None, "Saved model directory to inference")
 flags.DEFINE_string('class_map', None, "LVIS class ID to name mapping file (each line contains e.g. '19:armchair', IDs are 1-indexed, should be 1203 of them)")
 flags.DEFINE_multi_string('image', None, "Input image file path(s)")
+flags.DEFINE_boolean('cpu', False, "Whether to run on CPU instead of GPU")
+flags.DEFINE_integer('bench', 1, "Number of times to repeat inference for the purpose of more accurate timing benchmark")
 flags.DEFINE_boolean('graph_opt', True, "Perform graph optimisation on loaded model")
-flags.DEFINE_integer('max_boxes_roi', 100, "Maximum number of RoI boxes to draw")
-flags.DEFINE_integer('max_boxes_det', 50, "Maximum number of detection boxes to draw")
+flags.DEFINE_integer('max_boxes_roi', 200, "Maximum number of RoI boxes to draw")
+flags.DEFINE_integer('max_boxes_obj', 200, "Maximum number of regressed object boxes to draw")
+flags.DEFINE_integer('max_boxes_det', 100, "Maximum number of detection boxes to draw")
 flags.DEFINE_float('min_score_roi', 0.9, "Minimum score in order to draw a RoI box")
 flags.DEFINE_float('min_score_det', 0.2, "Minimum score in order to draw a detection box")
 flags.mark_flag_as_required('saved_model_dir')
@@ -40,8 +43,11 @@ def main(argv):
 		saved_model_dir=FLAGS.saved_model_dir,
 		class_map_path=FLAGS.class_map,
 		image_paths=FLAGS.image,
+		cpu=FLAGS.cpu,
+		bench=FLAGS.bench,
 		graph_opt=FLAGS.graph_opt,
 		max_boxes_roi=FLAGS.max_boxes_roi,
+		max_boxes_obj=FLAGS.max_boxes_obj,
 		max_boxes_det=FLAGS.max_boxes_det,
 		min_score_roi=FLAGS.min_score_roi,
 		min_score_det=FLAGS.min_score_det,
@@ -52,12 +58,20 @@ def inference(
 	saved_model_dir,
 	class_map_path,
 	image_paths,
+	cpu,
+	bench,
 	graph_opt,
 	max_boxes_roi,
+	max_boxes_obj,
 	max_boxes_det,
 	min_score_roi,
 	min_score_det,
 ):
+
+	print("Initialising TensorFlow...")
+	num_gpus = len(tf.config.list_physical_devices('GPU'))
+	print("Done")
+	print()
 
 	print("Inferencing saved model on image:")
 	print(f"  Saved model: {saved_model_dir}")
@@ -70,8 +84,10 @@ def inference(
 		print("  Images:")
 		for image_path in image_paths:
 			print(f"    {image_path}")
+	print(f"  Device: {'CPU' if cpu or num_gpus <= 0 else 'GPU'}")
 	print(f"  Optimise graph: {graph_opt}")
 	print(f"  Max RoI boxes: {max_boxes_roi}")
+	print(f"  Max obj boxes: {max_boxes_obj}")
 	print(f"  Max det boxes: {max_boxes_det}")
 	print(f"  Min RoI score: {min_score_roi}")
 	print(f"  Min det score: {min_score_det}")
@@ -96,7 +112,7 @@ def inference(
 
 	print("Starting TensorFlow session...")
 
-	session_config = tf.ConfigProto()
+	session_config = tf.ConfigProto(device_count={'GPU': 0 if cpu else num_gpus})
 	session_config.gpu_options.allow_growth = True
 	if not graph_opt:
 		session_config.graph_options.optimizer_options.opt_level = -1
@@ -134,12 +150,19 @@ def inference(
 			cv2.imshow('Input image', image_bgr)
 			cv2.waitKey(1)
 
-			start_time = time.perf_counter()
-			output_results = session.run(output_nodes, feed_dict={input_node.name: image_bgr[None, :, :, ::-1]})
-			print(f"Inference runtime: {time.perf_counter() - start_time:.3f}")
+			bench_times = []
+			for b in range(bench):
+				start_time = time.perf_counter()
+				output_results = session.run(output_nodes, feed_dict={input_node.name: image_bgr[None, :, :, ::-1]})
+				elapsed = time.perf_counter() - start_time
+				bench_times.append(elapsed)
+				print(f"Inference runtime: {elapsed:.3f}")
+			if bench >= 4:
+				print(f"Benched inference runtime: {sum(bench_times[2:]) / (bench - 2):.3f}")
 			print()
 
-			if (image_info := output_results.get('image_info', None)[0]) is not None:
+			if (image_info := output_results.get('image_info', None)) is not None:
+				image_info = image_info[0]
 
 				input_width = round(image_info[0, 1])
 				input_height = round(image_info[0, 0])
@@ -149,9 +172,11 @@ def inference(
 				print(f"Padded size: {round(image_info[4, 1])}x{round(image_info[4, 0])} (top-left aligned)")
 				if image_info[3, 1] != 0 or image_info[3, 0] != 0:
 					raise RuntimeError(f"Internal image translation is always assumed to be zero: ({image_info[3, 1]}, {image_info[3, 0]})")
+				box_units = np.tile(image_info[2:3, :], reps=(1, 2))
 				print()
 
-				if (backbone_input := output_results.get('backbone_input', None)[0]) is not None:
+				if (backbone_input := output_results.get('backbone_input', None)) is not None:
+					backbone_input = backbone_input[0]
 					print(f"Backbone input size: {shape_str(backbone_input)} (RGB)")
 					print(f"Backbone input min: {backbone_input.min(axis=(0, 1))}")
 					print(f"Backbone input mean: {backbone_input.mean(axis=(0, 1))}")
@@ -168,7 +193,8 @@ def inference(
 				if have_fpn_features:
 					print()
 
-				if (rpn_roi_scores := output_results.get('rpn_roi_scores', None)[0]) is not None:
+				if (rpn_roi_scores := output_results.get('rpn_roi_scores', None)) is not None:
+					rpn_roi_scores = rpn_roi_scores[0]
 					if not np.all(np.diff(rpn_roi_scores) <= 0):
 						raise RuntimeError("RPN RoI scores must be in decreasing order")
 					print(f"RPN RoI scores: {shape_str(rpn_roi_scores)}")
@@ -176,8 +202,8 @@ def inference(
 					print(f"RPN RoI scores max: {rpn_roi_scores.max()}")
 					print()
 
-				if (rpn_roi_boxes := output_results.get('rpn_roi_boxes', None)[0]) is not None:
-					rpn_roi_boxes = rpn_roi_boxes / np.tile(image_info[2:3, :], reps=(1, 2))
+				if (rpn_roi_boxes := output_results.get('rpn_roi_boxes', None)) is not None:
+					rpn_roi_boxes = rpn_roi_boxes[0] / box_units
 					print(f"RPN RoI boxes: {shape_str(rpn_roi_boxes)}")
 					print(f"RPN RoI boxes format: [ymin xmin ymax xmax] relative to {input_width}x{input_height} input image")
 					print(f"RPN RoI boxes min: {rpn_roi_boxes.min(axis=0)}")
@@ -185,7 +211,8 @@ def inference(
 					show_annotations(title='Regions of interest', image_bgr=image_bgr, boxes=rpn_roi_boxes, scores=rpn_roi_scores, max_boxes=max_boxes_roi, min_score=min_score_roi)
 					print()
 
-				if (rpn_roi_features := output_results.get('rpn_roi_features', None)[0]) is not None:
+				if (rpn_roi_features := output_results.get('rpn_roi_features', None)) is not None:
+					rpn_roi_features = rpn_roi_features[0]
 					print(f"RPN RoI features: {shape_str(rpn_roi_features)}")
 					print(f"RPN RoI features min: {rpn_roi_features.min()}")
 					print(f"RPN RoI features mean: {rpn_roi_features.mean()}")
@@ -193,11 +220,31 @@ def inference(
 					print(f"RPN RoI features max: {rpn_roi_features.max()}")
 					print()
 
-				if (det_count := output_results.get('det_count', None)[0]) is not None:
+				if (obj_boxes := output_results.get('obj_boxes', None)) is not None:
+					obj_boxes = obj_boxes[0] / box_units
+					print(f"Obj boxes: {shape_str(obj_boxes)}")
+					print(f"Obj boxes format: [ymin xmin ymax xmax] relative to {input_width}x{input_height} input image")
+					print(f"Obj boxes min: {obj_boxes.min(axis=0)}")
+					print(f"Obj boxes max: {obj_boxes.max(axis=0)}")
+					show_annotations(title='Regressed objects', image_bgr=image_bgr, boxes=obj_boxes, scores=False, max_boxes=max_boxes_obj, min_score=0)
+					print()
+
+				if (obj_clip_features := output_results.get('obj_clip_features', None)) is not None:
+					obj_clip_features = obj_clip_features[0]
+					print(f"Obj CLIP features: {shape_str(obj_clip_features)}")
+					obj_clip_features_norm: Any = np.linalg.norm(obj_clip_features, axis=1)
+					print(f"Obj CLIP features norm min: {obj_clip_features_norm.min()}")
+					print(f"Obj CLIP features norm mean: {obj_clip_features_norm.mean()}")
+					print(f"Obj CLIP features norm max: {obj_clip_features_norm.max()}")
+					print()
+
+				if (det_count := output_results.get('det_count', None)) is not None:
+					det_count = det_count[0]
 					print(f"Num detections: {det_count}")
 					print()
 
-				if (det_clip_features := output_results.get('det_clip_features', None)[0]) is not None:
+				if (det_clip_features := output_results.get('det_clip_features', None)) is not None:
+					det_clip_features = det_clip_features[0]
 					if det_count is not None:
 						det_clip_features = det_clip_features[:det_count]
 					print(f"Det CLIP features: {shape_str(det_clip_features)}")
@@ -207,7 +254,8 @@ def inference(
 					print(f"Det CLIP features norm max: {det_clip_features_norm.max()}")
 					print()
 
-				if (det_class_probs := output_results.get('det_class_probs', None)[0]) is not None:
+				if (det_class_probs := output_results.get('det_class_probs', None)) is not None:
+					det_class_probs = det_class_probs[0]
 					if det_count is not None:
 						det_class_probs = det_class_probs[:det_count]
 					print(f"Det class probs: {shape_str(det_class_probs)}")
@@ -219,7 +267,8 @@ def inference(
 					print(f"Det class max-prob max: {det_class_max_prob.max()}")
 					print()
 
-				if (det_classes := output_results.get('det_classes', None)[0]) is not None:
+				if (det_classes := output_results.get('det_classes', None)) is not None:
+					det_classes = det_classes[0]
 					if det_count is not None:
 						det_classes = det_classes[:det_count]
 					print(f"Det classes: {shape_str(det_classes)}")
@@ -227,7 +276,8 @@ def inference(
 					print(f"Det classes max: {det_classes.max()}")
 					print()
 
-				if (det_scores := output_results.get('det_scores', None)[0]) is not None:
+				if (det_scores := output_results.get('det_scores', None)) is not None:
+					det_scores = det_scores[0]
 					if not np.all(np.diff(det_scores) <= 0):
 						raise RuntimeError("Det scores must be in decreasing order")
 					if det_count is not None:
@@ -241,7 +291,8 @@ def inference(
 					print(f"Det scores max: {det_scores.max()}")
 					print()
 
-				if (det_masks := output_results.get('det_masks', None)[0]) is not None:
+				if (det_masks := output_results.get('det_masks', None)) is not None:
+					det_masks = det_masks[0]
 					if det_count is not None:
 						det_masks = det_masks[:det_count]
 					print(f"Det masks: {shape_str(det_masks)}")
@@ -252,10 +303,11 @@ def inference(
 					print(f"Det masks fill max: {det_masks_fill.max():.1%}")
 					print()
 
-				if (det_boxes := output_results.get('det_boxes', None)[0]) is not None:
+				if (det_boxes := output_results.get('det_boxes', None)) is not None:
+					det_boxes = det_boxes[0]
 					if det_count is not None:
 						det_boxes = det_boxes[:det_count]
-					det_boxes = det_boxes / np.tile(image_info[2:3, :], reps=(1, 2))
+					det_boxes = det_boxes / box_units
 					print(f"Det boxes: {shape_str(det_boxes)}")
 					print(f"Det boxes format: [ymin xmin ymax xmax] relative to {input_width}x{input_height} input image")
 					print(f"Det boxes min: {det_boxes.min(axis=0)}")
@@ -275,21 +327,17 @@ def show_annotations(title, image_bgr, boxes, scores, max_boxes, min_score, clas
 		boxes=boxes,
 		classes=classes,
 		agnostic_mode=classes is None,
-		scores=scores if scores is not None else np.ones(boxes.shape[0], dtype=np.float32),
+		scores=None if scores is False else np.ones(boxes.shape[0], dtype=np.float32) if scores is None or scores is True else scores,
 		category_index=class_map,
 		instance_masks=instance_masks,
 		use_normalized_coordinates=False,
 		max_boxes_to_draw=max_boxes,
 		min_score_thresh=min_score,
 		line_thickness=LINE_THICKNESS,
+		groundtruth_box_visualization_color='#008cff',
 	))
 	num_boxes = boxes.shape[0]
-	if scores is None:
-		if num_boxes <= max_boxes:
-			print(f"Annotated {num_boxes} boxes")
-		else:
-			print(f"Annotated {max_boxes} (limit) boxes")
-	else:
+	if isinstance(scores, np.ndarray):
 		scored_boxes = np.searchsorted(-scores, -min_score, side='left')
 		if scored_boxes <= 0:
 			print(f"Annotated 0 boxes (none are above score of {min_score:.1%})")
@@ -299,6 +347,10 @@ def show_annotations(title, image_bgr, boxes, scores, max_boxes, min_score, clas
 			print(f"Annotated {scored_boxes} boxes down to a score of {scores[scored_boxes - 1]:.1%} (limit)")
 		else:
 			print(f"Annotated {scored_boxes} boxes down to a score of {scores[scored_boxes - 1]:.1%}")
+	elif num_boxes <= max_boxes:
+		print(f"Annotated {num_boxes} boxes")
+	else:
+		print(f"Annotated {max_boxes} (limit) boxes")
 
 # Shape to string
 def shape_str(array):
