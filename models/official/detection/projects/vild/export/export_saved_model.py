@@ -31,7 +31,7 @@ flags.DEFINE_integer('resnet_depth', 50, "ResNet backbone depth")
 flags.DEFINE_integer('num_rois', 1000, "Number of regions of interest to select")
 flags.DEFINE_integer('num_dets', 300, "Number of object detections to select")
 flags.DEFINE_boolean('apply_nms', False, "Apply non-maximum suppression (NMS) to the final detections as part of postprocessing")
-flags.DEFINE_string('checkpoint_path', None, "Input checkpoint specification (appending .index or .meta to this path should yield existing file paths)")
+flags.DEFINE_string('checkpoint', None, "Input checkpoint specification (appending .index or .meta to this path should yield existing file paths)")
 flags.DEFINE_string('classifier_weights', None, "Weights to initialise the CLIP classification dense layer with")
 flags.DEFINE_string('export_dir', None, "Export directory to write saved model files into (created if doesn't exist)")
 flags.DEFINE_boolean('overwrite_export_dir', False, "Delete and recreate the export directory if it exists")
@@ -46,7 +46,7 @@ flags.DEFINE_boolean('output_clip_features', False, "Include model output: CLIP 
 flags.DEFINE_boolean('output_class_probs', False, "Include model output: Object class probabilities")
 flags.DEFINE_boolean('output_classes', False, "Include model output: Predicted object classes and scores")
 flags.DEFINE_boolean('output_masks', False, "Include model output: Object segmentation masks")
-flags.mark_flag_as_required('checkpoint_path')
+flags.mark_flag_as_required('checkpoint')
 flags.mark_flag_as_required('classifier_weights')
 flags.mark_flag_as_required('export_dir')
 
@@ -60,7 +60,7 @@ def main(argv):
 		num_rois=FLAGS.num_rois,
 		num_dets=FLAGS.num_dets,
 		apply_nms=FLAGS.apply_nms,
-		checkpoint_path=FLAGS.checkpoint_path,
+		checkpoint=FLAGS.checkpoint,
 		classifier_weights=FLAGS.classifier_weights,
 		export_dir=FLAGS.export_dir,
 		overwrite_export_dir=FLAGS.overwrite_export_dir,
@@ -85,7 +85,7 @@ def export(
 	num_rois,
 	num_dets,
 	apply_nms,
-	checkpoint_path,
+	checkpoint,
 	classifier_weights,
 	export_dir,
 	overwrite_export_dir,
@@ -110,7 +110,7 @@ def export(
 	print(f"  Num RoIs: {num_rois}")
 	print(f"  Num detections: {num_dets}")
 	print(f"  Apply NMS: {apply_nms}")
-	print(f"  Input checkpoint: {checkpoint_path}.*")
+	print(f"  Input checkpoint: {checkpoint}.*")
 	print(f"  Classifier weights: {classifier_weights}")
 	print(f"  Export dir: {export_dir}{' [OVERWRITE]' if overwrite_export_dir and export_dir_exists else ''}")
 	print(f"  Image size: {image_size[1]}x{image_size[0]}")
@@ -220,7 +220,7 @@ def export(
 	export_path = estimator.export_saved_model(
 		export_dir_base=export_dir_base,
 		serving_input_receiver_fn=serving_input_receiver_fn,
-		checkpoint_path=checkpoint_path,
+		checkpoint_path=checkpoint,
 	)
 	print(f"Temporarily exported saved model as: {export_path.decode('utf-8')}")
 	if os.path.exists(export_dir):
