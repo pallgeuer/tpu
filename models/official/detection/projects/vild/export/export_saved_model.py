@@ -10,6 +10,7 @@ import io
 import os
 import shutil
 import pprint
+import inspect
 import functools
 import contextlib
 from absl import flags
@@ -250,7 +251,10 @@ def export(
 	with contextlib.redirect_stdout(io.StringIO()) as string_buffer:
 		parser = saved_model_cli.create_parser()
 		args = parser.parse_args(['show', '--dir', export_dir, '--all'])
-		args.func(args)
+		if inspect.signature(args.func).parameters:
+			args.func(args)
+		else:
+			args.func()
 	info = string_buffer.getvalue()
 	print(info)
 	with open(os.path.join(export_dir, 'info.txt'), 'w') as file:
